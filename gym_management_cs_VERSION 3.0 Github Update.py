@@ -108,6 +108,26 @@ class GymManager:
         end = start + timedelta(days=PLANS[plan]["days"]-1)
         return self.db.run("""INSERT INTO memberships(customer_id,plan_name,start_date,end_date,plan_price)
           VALUES(?,?,?,?,?)""", (cid,plan,start.isoformat(),end.isoformat(),PLANS[plan]["price"]))
+    def update_membership(self, mid, plan, start_text):
+        if plan not in PLANS: raise ValueError("Choose a valid membership plan.")
+        try: start = date.fromisoformat(start_text)
+        except ValueError: raise ValueError("Start date must use YYYY-MM-DD.")
+        end = start + timedelta(days=PLANS[plan]["days"]-1)
+        price = PLANS[plan]["price"]
+        with self.db.connect() as con:
+            membership = con.execute(
+                "SELECT id FROM memberships WHERE id=?", (mid,)
+            ).fetchone()
+            if not membership: raise ValueError("Membership record not found.")
+            paid = con.execute(
+                "SELECT COALESCE(SUM(amount),0) total FROM payments WHERE membership_id=?", (mid,)
+            ).fetchone()["total"]
+            if paid > price + .00001:
+                raise ValueError(f"Recorded payments total ₱{paid:,.2f}, which exceeds this plan's price of ₱{price:,.2f}.")
+            status = "Paid" if paid >= price - .005 else ("Partial" if paid > 0 else "Unpaid")
+            con.execute("""UPDATE memberships
+                SET plan_name=?,start_date=?,end_date=?,plan_price=?,payment_status=?
+                WHERE id=?""", (plan,start.isoformat(),end.isoformat(),price,status,mid))
     def delete_customer(self, cid):
         # Preserve history: customers with any linked records cannot be deleted.
         related = self.db.one("""SELECT
@@ -450,17 +470,28 @@ class GymApp(ctk.CTk):
         rows=self.db.all("SELECT id,full_name,phone FROM customers ORDER BY full_name COLLATE NOCASE")
         return rows,[f"{r['id']} - {r['full_name']} ({r['phone']})" for r in rows]
     def membership_page(self):
-        p=self.page("Memberships"); f=self.section(p,"Create / Renew Membership","End date is calculated automatically")
-        _,opts=self.choices()
+        p=self.page("Memberships"); f=self.section(p,"Create / Renew Membership","Choose a customer, plan, and start date. End date and price update automatically.")
+        customer_rows,opts=self.choices()
+        self.membership_customer_options={row["id"]:option for row,option in zip(customer_rows,opts)}
+        self.editing_membership_id=None
         if not opts: ctk.CTkLabel(f,text="Add a customer first.",text_color=self.MUTED).pack(anchor="w",padx=16,pady=(0,14))
         else:
             r=ctk.CTkFrame(f,fg_color="transparent"); r.pack(fill="x",padx=13,pady=(0,13))
             self.mc=ctk.CTkComboBox(r,values=opts,width=260); self.mc.pack(side="left",padx=4)
             self.mp=ctk.CTkComboBox(r,values=list(PLANS),width=190); self.mp.set("Monthly"); self.mp.pack(side="left",padx=4)
             self.ms=self.entry(r,"Start YYYY-MM-DD",165); self.ms.insert(0,date.today().isoformat()); self.ms.pack(side="left",padx=4)
-            self.button(r,"Create Membership",self.create_membership,145).pack(side="left",padx=4)
+            self.membership_action_button=self.button(r,"Create Membership",self.create_membership,145)
+            self.membership_action_button.pack(side="left",padx=4)
+            self.membership_cancel_button=self.button(r,"Cancel Edit",self.cancel_membership_edit,100,"#64748b")
+            self.membership_cancel_button.pack_forget()
+            self.membership_preview=ctk.CTkLabel(f,text="",text_color=self.MUTED)
+            self.membership_preview.pack(anchor="w",padx=18,pady=(0,12))
+            self.mp.configure(command=self.update_membership_preview)
+            self.ms.bind("<KeyRelease>",self.update_membership_preview)
+            self.update_membership_preview()
         sec=self.section(p,"Membership Records","A partial or full payment is required for access, and membership dates must be valid.")
-        rows=self.db.all("""SELECT m.*,c.full_name,COALESCE((SELECT SUM(amount) FROM payments WHERE membership_id=m.id),0) paid
+        rows=self.db.all("""SELECT m.*,c.full_name,c.id customer_id,
+          COALESCE((SELECT SUM(amount) FROM payments WHERE membership_id=m.id),0) paid
           FROM memberships m JOIN customers c ON c.id=m.customer_id ORDER BY m.id DESC LIMIT 250""")
         today=date.today().isoformat(); data=[]
         for x in rows:
@@ -478,17 +509,85 @@ class GymApp(ctk.CTk):
 
     def membership_records_table(self, parent, rows):
         box=ctk.CTkFrame(parent,fg_color="white"); box.pack(fill="x",padx=12,pady=(0,14))
-        headers=["ID","Customer","Plan","Start","End","Price","Payment","Balance","Access","Delete"]
+        headers=["ID","Customer","Plan","Start","End","Price","Payment","Balance","Access","Edit","Delete"]
         for i,h in enumerate(headers):
             box.grid_columnconfigure(i,weight=1,uniform="membership_table")
             ctk.CTkLabel(box,text=h,text_color=self.DARK,font=ctk.CTkFont(size=10,weight="bold"),anchor="center").grid(row=0,column=i,sticky="ew",padx=3,pady=8)
         for n,row in enumerate(rows,1):
-            for i,value in enumerate(row):
+            for i,value in enumerate(row[:9]):
                 box.grid_columnconfigure(i,weight=1,uniform="membership_table")
                 ctk.CTkLabel(box,text=str(value),text_color=self.TEXT,anchor="center",justify="center",wraplength=95).grid(row=n,column=i,sticky="ew",padx=3,pady=7)
             mid=int(row[0])
-            ctk.CTkButton(box,text="Delete",width=55,height=26,fg_color="#b91c1c",hover_color="#991b1b",command=lambda m=mid:self.delete_membership(m)).grid(row=n,column=9,padx=2,pady=3)
+            ctk.CTkButton(box,text="Edit",width=50,height=26,command=lambda m=mid:self.edit_membership(m)).grid(row=n,column=9,padx=2,pady=3)
+            ctk.CTkButton(box,text="Delete",width=55,height=26,fg_color="#b91c1c",hover_color="#991b1b",command=lambda m=mid:self.delete_membership(m)).grid(row=n,column=10,padx=2,pady=3)
         if not rows: ctk.CTkLabel(box,text="No membership records found.",text_color=self.MUTED).grid(row=1,column=0,columnspan=len(headers),pady=12)
+    def update_membership_preview(self, _value=None):
+        del _value
+        plan=self.mp.get()
+        try:
+            start=date.fromisoformat(self.ms.get().strip())
+            end=start+timedelta(days=PLANS[plan]["days"]-1)
+            self.membership_preview.configure(text=f"Ends {end.isoformat()}  •  Plan price ₱{PLANS[plan]['price']:,.2f}")
+        except (ValueError,KeyError):
+            self.membership_preview.configure(text="Enter a valid plan and start date (YYYY-MM-DD).")
+    def edit_membership(self, mid):
+        membership=self.db.one("SELECT customer_id,plan_name,start_date FROM memberships WHERE id=?",(mid,))
+        if not membership: return messagebox.showerror("Unable to edit membership","Membership record not found.")
+        customer_option=self.membership_customer_options.get(membership["customer_id"])
+        if not customer_option: return messagebox.showerror("Unable to edit membership","Membership customer was not found.")
+        self.editing_membership_id=mid
+        self.mc.set(customer_option)
+        self.mc.configure(state="disabled")
+        self.mp.set(membership["plan_name"])
+        self.ms.delete(0,"end"); self.ms.insert(0,membership["start_date"])
+        self.membership_action_button.configure(text="Save Changes",command=self.save_membership_changes)
+        self.membership_cancel_button.pack(side="left",padx=4)
+        self.update_membership_preview()
+        self.mp.focus_set()
+    def cancel_membership_edit(self):
+        self.editing_membership_id=None
+        self.mc.configure(state="normal")
+        self.mp.set("Monthly")
+        self.ms.delete(0,"end"); self.ms.insert(0,date.today().isoformat())
+        self.membership_action_button.configure(text="Create Membership",command=self.create_membership)
+        self.membership_cancel_button.pack_forget()
+        self.update_membership_preview()
+    def confirm_membership_dates(self, customer_id, plan_name, start_text, exclude_id=None):
+        if plan_name not in PLANS: raise ValueError("Choose a valid membership plan.")
+        try: start=date.fromisoformat(start_text)
+        except ValueError: raise ValueError("Start date must use YYYY-MM-DD.")
+        end=start+timedelta(days=PLANS[plan_name]["days"]-1)
+        sql="""SELECT plan_name,start_date,end_date FROM memberships
+            WHERE customer_id=? AND start_date<=? AND end_date>=?"""
+        params=[customer_id,end.isoformat(),start.isoformat()]
+        if exclude_id is not None:
+            sql+=" AND id<>?"
+            params.append(exclude_id)
+        overlaps=self.db.all(sql+" ORDER BY start_date",tuple(params))
+        if overlaps:
+            customer=self.db.one("SELECT full_name FROM customers WHERE id=?",(customer_id,))
+            existing="\n".join(f"{row['plan_name']} ({row['start_date']} to {row['end_date']})" for row in overlaps)
+            if not messagebox.askyesno(
+                "Overlapping Membership",
+                f"{customer['full_name']} already has membership dates that overlap with this plan.\n\n"
+                f"Existing membership(s):\n{existing}\n\n"
+                f"New membership: {plan_name} ({start.isoformat()} to {end.isoformat()})\n\n"
+                "Do you want to continue?",
+            ):
+                return None
+        return start
+    def save_membership_changes(self):
+        mid=self.editing_membership_id
+        if mid is None: return
+        try:
+            customer_id=int(self.mc.get().split(" - ",1)[0])
+            start=self.confirm_membership_dates(customer_id,self.mp.get(),self.ms.get().strip(),mid)
+            if start is None: return
+            self.manager.update_membership(mid,self.mp.get(),start.isoformat())
+            self.membership_page()
+            messagebox.showinfo("Updated","Membership updated. Existing payment history was kept.")
+        except (ValueError,sqlite3.Error) as e:
+            messagebox.showerror("Unable to update membership",str(e))
     def delete_membership(self, mid):
         if not messagebox.askyesno("Confirm membership deletion", f"Delete membership ID {mid}? Any linked payments must be deleted first. This cannot be undone."):
             return
@@ -506,36 +605,8 @@ class GymApp(ctk.CTk):
         try:
             cid = int(self.mc.get().split(" - ", 1)[0])
             plan_name = self.mp.get()
-            start_text = self.ms.get().strip()
-            if plan_name not in PLANS:
-                raise ValueError("Choose a valid membership plan.")
-            try:
-                start = date.fromisoformat(start_text)
-            except ValueError:
-                raise ValueError("Start date must use YYYY-MM-DD.")
-            proposed_end = start + timedelta(days=PLANS[plan_name]["days"] - 1)
-
-            # Warn about date overlap, but let the user continue if intentional.
-            overlaps = self.db.all("""SELECT plan_name, start_date, end_date
-                FROM memberships
-                WHERE customer_id=? AND start_date<=? AND end_date>=?
-                ORDER BY start_date""", (cid, proposed_end.isoformat(), start.isoformat()))
-            if overlaps:
-                customer = self.db.one("SELECT full_name FROM customers WHERE id=?", (cid,))
-                existing = "\n".join(
-                    f"• {row['plan_name']} ({row['start_date']} to {row['end_date']})"
-                    for row in overlaps
-                )
-                proceed = messagebox.askyesno(
-                    "Overlapping Membership",
-                    f"{customer['full_name']} already has membership dates that overlap with this plan.\n\n"
-                    f"Existing membership(s):\n{existing}\n\n"
-                    f"New membership: {plan_name} ({start.isoformat()} to {proposed_end.isoformat()})\n\n"
-                    "Do you want to create it anyway?",
-                )
-                if not proceed:
-                    return
-
+            start = self.confirm_membership_dates(cid,plan_name,self.ms.get().strip())
+            if start is None: return
             self.manager.add_membership(cid, plan_name, start.isoformat())
             self.membership_page()
             messagebox.showinfo("Created", "Membership created. Record a partial or full payment to enable access.")
