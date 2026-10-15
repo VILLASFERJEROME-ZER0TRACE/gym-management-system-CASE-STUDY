@@ -257,34 +257,6 @@ class GymApp(ctk.CTk):
         return ctk.CTkEntry(parent,placeholder_text=placeholder,width=width)
     def button(self,parent,text,cmd,width=110,color=None):
         return ctk.CTkButton(parent,text=text,command=cmd,width=width,height=35,corner_radius=8,fg_color=color or self.GREEN,hover_color=self.DARK)
-    def dashboard_return_button(self,parent):
-        base_color="#526b5a"; hover_color="#43834a"
-        button=ctk.CTkButton(parent,text="Return to the dashboard",width=220,height=38,corner_radius=8,
-                             fg_color=base_color,hover=False,
-                             command=lambda:self._return_to_dashboard(button))
-        button.animation_id=0; button.animation_color=base_color
-        def animate(hovered):
-            button.animation_id+=1; animation_id=button.animation_id
-            start_width=button.cget("width"); start_color=button.animation_color
-            target_width=232 if hovered else 220
-            target_color=hover_color if hovered else base_color
-            start_rgb=tuple(int(start_color[i:i+2],16) for i in (1,3,5))
-            target_rgb=tuple(int(target_color[i:i+2],16) for i in (1,3,5))
-            def frame(step=1):
-                if not button.winfo_exists() or button.animation_id!=animation_id: return
-                progress=step/6
-                color="#"+"".join(f"{round(start+(end-start)*progress):02x}"
-                                   for start,end in zip(start_rgb,target_rgb))
-                width=round(start_width+(target_width-start_width)*progress)
-                button.configure(width=width,fg_color=color); button.animation_color=color
-                if step<6: self.after(18,lambda:frame(step+1))
-            frame()
-        button.bind("<Enter>",lambda _event:animate(True),add="+")
-        button.bind("<Leave>",lambda _event:animate(False),add="+")
-        button.pack(anchor="w",padx=4,pady=(0,12))
-    def _return_to_dashboard(self,button):
-        button.configure(state="disabled",text="Opening dashboard...",fg_color=self.DARK)
-        self.after(110,lambda:self.navigate("Dashboard",self.dashboard))
     def table(self,parent,headers,rows):
         box=ctk.CTkFrame(parent,fg_color="white"); box.pack(fill="x",padx=14,pady=(0,15))
         h=ctk.CTkFrame(box,fg_color="#eef4ef"); h.pack(fill="x")
@@ -334,7 +306,6 @@ class GymApp(ctk.CTk):
         self.button(sr,"Search",self.refresh_customers,80).pack(side="left",padx=6)
         self.button(sr,"Show All",lambda:(self.csearch.delete(0,"end"),self.refresh_customers()),80,"#64748b").pack(side="left")
         self.ctable=self.section(p,"Customer List","Select a customer to load their details"); self.refresh_customers()
-        self.dashboard_return_button(p)
     def add_customer(self):
         try:
             name, phone, email = self.cn.get(), self.cp.get(), self.ce.get()
@@ -504,7 +475,7 @@ class GymApp(ctk.CTk):
                 access = "Active"
             data.append((x["id"],x["full_name"],x["plan_name"],x["start_date"],x["end_date"],f"₱{x['plan_price']:,.2f}",x["payment_status"],f"₱{bal:,.2f}",access))
         self.membership_records_table(sec, data)
-        self.dashboard_return_button(p)
+
     def membership_records_table(self, parent, rows):
         box=ctk.CTkFrame(parent,fg_color="white"); box.pack(fill="x",padx=12,pady=(0,14))
         headers=["ID","Customer","Plan","Start","End","Price","Payment","Balance","Access","Delete"]
@@ -601,7 +572,6 @@ class GymApp(ctk.CTk):
         self.outstanding_section=self.section(p,"Outstanding Balances","Oldest membership start date first")
         self.refresh_outstanding_balances()
         self.ptable=self.section(p,"Payment History","Newest first"); self.refresh_payments()
-        self.dashboard_return_button(p)
     def fill_full_balance(self):
         try:
             membership_id=int(self.pm.get().split(" - ",1)[0])
@@ -778,7 +748,6 @@ class GymApp(ctk.CTk):
         self.afilter=self.entry(sr,"YYYY-MM-DD or blank",180); self.afilter.pack(side="left")
         self.button(sr,"Apply Filter",self.refresh_attendance,100).pack(side="left",padx=6)
         self.atable=self.section(p,"Attendance History","Newest first"); self.refresh_attendance()
-        self.dashboard_return_button(p)
     def checkin(self):
         try: self.manager.check_in(int(self.ac.get().split(" - ",1)[0])); self.attendance_page(); messagebox.showinfo("Success","Member checked in.")
         except (ValueError,sqlite3.Error) as e: messagebox.showerror("Check-in failed",str(e))
